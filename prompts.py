@@ -3,7 +3,9 @@ class GetPrompts():
     # 类的初始化方法，设置各种提示词相关的属性
     def __init__(self):
         # 定义任务提示，说明需要设计策略来更新距离矩阵以避免陷入局部最优，最终目标是找到距离最小的路径
-        self.prompt_task = "Task: Given an edge distance matrix and a local optimal route, please help me design a strategy to update the distance matrix to avoid being trapped in the local optimum with the final goal of finding a tour with minimized distance. \
+        self.prompt_task = "Task: Given an edge distance matrix and a local optimal route,
+        please help me design a strategy to update the distance matrix to avoid being trapped in the local 
+        optimum with the final goal of finding a tour with minimized distance. \
 You should create a heuristic for me to update the edge distance matrix."
         # 定义函数名称提示，指定所需函数名为update_edge_distance
         self.prompt_func_name = "update_edge_distance"
@@ -12,7 +14,8 @@ You should create a heuristic for me to update the edge distance matrix."
         # 定义函数输出参数提示，输出为updated_edge_distance
         self.prompt_func_outputs = ['updated_edge_distance']
         # 定义输入输出信息提示，说明local_opt_tour包含局部最优路径的ID，edge_distance和edge_n_used是矩阵，edge_n_used包含每个边在排列过程中使用的次数
-        self.prompt_inout_inf = "'local_opt_tour' includes the local optimal tour of IDs, 'edge_distance' and 'edge_n_used' are matrixes, 'edge_n_used' includes the number of each edge used during permutation."
+        self.prompt_inout_inf = "'local_opt_tour' includes the local optimal tour of IDs, 'edge_distance' 
+        and 'edge_n_used' are matrixes, 'edge_n_used' includes the number of each edge used during permutation."
         # 定义其他信息提示，说明所有参数都是Numpy数组
         self.prompt_other_inf = "All are Numpy arrays."
 
@@ -42,11 +45,14 @@ You should create a heuristic for me to update the edge distance matrix."
     
 #     # 注释掉的获取创建提示的方法，用于生成创建新策略的提示内容，包含任务描述、函数要求、输入输出说明等
 #     def get_prompt_create(self):
-#         prompt_content = "Task: Given an edge distance matrix and a local optimal route, please help me design a strategy to update the distance matrix to avoid being trapped in the local optimum with the final goal of finding a tour with minimized distance. \
+#         prompt_content = "Task: Given an edge distance matrix and a local optimal route, 
+please help me design a strategy to update the distance matrix to avoid being trapped in the local optimum with the final goal of finding a tour with minimized distance. \
 # You should create a strategy for me to update the edge distance matrix. \
 # Provide a description of the new strategy in no more than two sentences. The description must be inside a brace. \
-# Provide the Python code for the new strategy. The code is a Python function called 'update_edge_distance' that takes three inputs 'edge_distance', 'local_opt_tour', 'edge_n_used', and outputs the 'updated_edge_distance', \
-# where 'local_opt_tour' includes the local optimal tour of IDs, 'edge_distance' and 'edge_n_used' are matrixes, 'edge_n_used' includes the number of each edge used during permutation. All are Numpy arrays. Pay attention to the format and do not give additional explanation."
+# Provide the Python code for the new strategy. The code is a Python function called 'update_edge_distance' that takes three inputs 'edge_distance', 
+'local_opt_tour', 'edge_n_used', and outputs the 'updated_edge_distance', \
+# where 'local_opt_tour' includes the local optimal tour of IDs, 'edge_distance' and 'edge_n_used' are matrixes, 'edge_n_used' includes the number of 
+each edge used during permutation. All are Numpy arrays. Pay attention to the format and do not give additional explanation."
 #         return prompt_content
     
 
