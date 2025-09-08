@@ -1,131 +1,315 @@
-# 导入所需模块：numpy用于数值计算，time用于时间相关操作，joblib的Parallel和delayed用于并行计算，
-# os用于文件路径操作，types用于创建模块对象，warnings用于处理警告，sys用于系统相关操作
+# 导入所需的库：numpy用于数值计算，importlib用于动态导入模块，time用于计时，numba的jit用于加速函数执行
 import numpy as np
+import importlib
 import time
-from joblib import Parallel, delayed
-import os
+from numba import jit
+
+# 导入随机数生成、类型检查、警告处理和系统相关的库
+import random
 import types
 import warnings
 import sys
 
-# 从utils模块导入readTSPRandom用于读取TSP随机实例数据，从gls.gls_run模块导入solve_instance用于求解单个TSP实例
-from utils import readTSPRandom
-from gls.gls_run import solve_instance
+# 导入numba相关的警告类，用于过滤特定警告
+from numba.core.errors import NumbaDeprecationWarning, NumbaPendingDeprecationWarning
+import warnings
 
-# 定义TSPGLS类，用于封装TSP问题结合引导式局部搜索（GLS）的相关功能
-class TSPGLS():
-    # 类的初始化方法，设置各种参数和加载数据
+# 过滤numba的弃用警告和待弃用警告
+warnings.simplefilter('ignore', category=NumbaDeprecationWarning)
+warnings.simplefilter('ignore', category=NumbaPendingDeprecationWarning)
+# 过滤特定的用户警告（关于从.libs加载多个DLL）
+warnings.filterwarnings("ignore", message="loaded more than 1 DLL from .libs", category=UserWarning)
+
+# 使用numba的jit装饰器加速makespan函数，该函数计算调度方案的最大完工时间
+@jit(nopython=True)
+def makespan(order, tasks, machines_val):
+    # 初始化每个机器的时间为0
+    times = []
+    for i in range(0, machines_val):
+        times.append(0)
+    # 遍历作业序列，更新每个机器的时间
+    for j in order:
+        # 第一个机器的时间直接累加当前作业的处理时间
+        times[0] += tasks[j][0]
+        # 后续机器的时间取前一个机器完成时间和当前机器已有时间的最大值，再累加当前作业处理时间
+        for k in range(1, machines_val):
+            if times[k] < times[k-1]:
+                times[k] = times[k-1]
+            times[k] += tasks[j][k]
+    # 返回最大完工时间（所有机器中最大的时间）
+    return max(times)
+
+# 使用numba加速局部搜索函数，通过交换或移动作业位置优化调度方案
+@jit(nopython=True)
+def local_search(sequence, cmax_old,tasks,machines_val):
+    # 复制当前序列作为新序列的初始值
+    new_seq = sequence[:]
+    # 遍历序列中的作业对，尝试交换位置并计算新的最大完工时间
+    for i in range(len(new_seq)):
+        for j in range(i+1, len(new_seq)):
+            temp_seq = new_seq[:]
+            temp_seq[i], temp_seq[j] = temp_seq[j], temp_seq[i]
+            cmax = makespan(temp_seq, tasks, machines_val)
+            # 如果新的最大完工时间更小，则更新序列和最优值
+            if cmax < cmax_old:
+                new_seq = temp_seq[:]
+                cmax_old = cmax
+
+    # 遍历序列，尝试将作业移动到其他位置并计算新的最大完工时间
+    for i in range(1,len(new_seq)):
+        for j in range(1,len(new_seq)):
+            temp_seq = new_seq[:]
+            temp_seq.remove(i)
+            temp_seq.insert(j, i)
+            cmax = makespan(temp_seq, tasks, machines_val)
+            # 如果新的最大完工时间更小，则更新序列和最优值
+            if cmax < cmax_old:
+                new_seq = temp_seq[:]
+                cmax_old = cmax
+
+    # 返回优化后的序列
+    return new_seq
+
+# 带扰动的局部搜索函数，仅对指定的作业进行交换和移动操作
+@jit(nopython=True)
+def local_search_perturb(sequence, cmax_old,tasks,machines_val,job):
+    new_seq = sequence[:]
+    # 仅对job列表中的作业进行交换操作
+    for i in job:
+        for j in range(i+1, len(new_seq)):
+            temp_seq = new_seq[:]
+            temp_seq[i], temp_seq[j] = temp_seq[j], temp_seq[i]
+            cmax = makespan(temp_seq, tasks, machines_val)
+            if cmax < cmax_old:
+                new_seq = temp_seq[:]
+                cmax_old = cmax
+
+    # 仅对job列表中的作业进行移动操作
+    for i in job:
+        for j in range(1,len(new_seq)):
+            temp_seq = new_seq[:]
+            temp_seq.remove(i)
+            temp_seq.insert(j, i)
+            cmax = makespan(temp_seq, tasks, machines_val)
+            if cmax < cmax_old:
+                new_seq = temp_seq[:]
+                cmax_old = cmax
+
+    # 返回优化后的序列
+    return new_seq
+
+# 定义JSSPGLS类，用于解决作业车间调度问题的广义局部搜索
+class JSSPGLS():
     def __init__(self) -> None:
-        self.n_inst_eva = 3  # 评估时使用的实例数量，这里是测试用的小值
-        self.time_limit = 10  # 每个实例的最大求解时间（秒）
-        self.ite_max = 1000  # 每个实例在GLS中局部搜索的最大迭代次数
-        self.perturbation_moves = 1  # 每次扰动中每条边的移动次数
-        path = os.path.dirname(os.path.abspath(__file__))  # 获取当前文件所在目录的绝对路径
-        self.instance_path = path+'/TrainingData/TSPAEL64.pkl'  # 训练数据的路径，包含TSP实例
-        self.debug_mode=False  # 是否启用调试模式，默认为False
-
-        # 读取训练数据，获取坐标、实例（距离矩阵）和最优成本
-        self.coords,self.instances,self.opt_costs = readTSPRandom.read_instance_all(self.instance_path)
-
-        # 从prompts模块导入GetPrompts类并创建实例，用于生成提示词
+        self.n_inst_eva = 3  # 用于测试的实例数量（较小）
+        self.iter_max = 1000  # 广义局部搜索的最大迭代次数
+        self.time_max = 30  # 每个实例的最大运行时间（秒）
+        # 读取实例数据，获取作业数、机器数和处理时间矩阵
+        self.tasks_val, self.machines_val, self.tasks = self.read_instances()
+        # 导入提示信息类，用于与LLM交互
         from prompts import GetPrompts
         self.prompts = GetPrompts()
 
-    # 计算给定路径的成本，基于实例的坐标计算欧氏距离
-    def tour_cost(self,instance, solution, problem_size):
-        cost = 0  # 初始化成本为0
-        # 计算路径中相邻节点之间的距离并累加
-        for j in range(problem_size - 1):
-            cost += np.linalg.norm(instance[int(solution[j])] - instance[int(solution[j + 1])])
-        # 计算路径最后一个节点与第一个节点之间的距离（闭合路径）
-        cost += np.linalg.norm(instance[int(solution[-1])] - instance[int(solution[0])])
-        return cost  # 返回总路径成本
+    ############################################### 局部搜索 ####################################################
+    def ls(self,tasks_val, tasks, machines_val):
+        # 使用NEH算法生成初始序列和对应的最大完工时间
+        pi0, cmax0 = self.neh(tasks, machines_val, tasks_val) 
+        # 初始化当前序列和最优最大完工时间
+        pi = pi0
+        cmax_old = cmax0
+        # 循环进行局部搜索，直到无法找到更优解
+        while True:
+            piprim = local_search(pi, cmax_old,tasks,machines_val)
+            cmax = makespan(piprim, tasks, machines_val)
+            # 如果新解不优于当前解，则跳出循环
+            if (cmax>=cmax_old):
+                break
+            # 否则更新当前序列和最优值
+            else:
+                pi = piprim
+                cmax_old = cmax
+        # 返回最优序列和对应的最大完工时间
+        return pi, cmax_old
 
-    # 生成邻域矩阵，每个节点的邻域按距离排序
-    def generate_neighborhood_matrix(self,instance):
-        instance = np.array(instance)  # 将实例转换为numpy数组
-        n = len(instance)  # 获取节点数量
-        neighborhood_matrix = np.zeros((n, n), dtype=int)  # 初始化邻域矩阵
+    ############################################### 迭代局部搜索 ####################################################
+    def gls(self,heuristic):
+        # 初始化存储每个实例最优最大完工时间的数组
+        cmax_best_list = np.zeros(self.n_inst_eva)
+        
+        n_inst = 0
+        # 遍历每个实例的作业数、处理时间矩阵和机器数
+        for tasks_val,tasks,machines_val in zip(self.tasks_val, self.tasks, self.machines_val):
+            # 初始化最优最大完工时间为一个很大的值
+            cmax_best = 1E10
+            # 设置随机种子，保证结果可复现
+            random.seed(2024)
+            try:
+                # 使用NEH算法生成初始序列和最大完工时间
+                pi, cmax = self.neh(tasks, machines_val, tasks_val) 
+                n = len(pi)
+                
+                # 初始化最优序列和最优最大完工时间
+                pi_best = pi
+                cmax_best = cmax
+                n_itr = 0
+                time_start = time.time()
+                # 在最大时间和最大迭代次数内循环
+                while time.time() - time_start < self.time_max and n_itr <self.iter_max:
+                    # 对当前序列进行局部搜索
+                    piprim = local_search(pi, cmax,tasks,machines_val)
 
-        # 对每个节点，计算其与其他所有节点的距离并排序，得到邻域索引
-        for i in range(n):
-            distances = np.linalg.norm(instance[i] - instance, axis=1)  # 计算节点i到所有节点的欧氏距离
-            sorted_indices = np.argsort(distances)  # 按距离排序得到索引
-            neighborhood_matrix[i] = sorted_indices  # 将排序后的索引存入邻域矩阵
+                    pi = piprim
+                    cmax = makespan(pi, tasks, machines_val)
+                    
+                    # 如果找到更优解，更新最优序列和最优值
+                    if (cmax<cmax_best):
+                        pi_best = pi
+                        cmax_best = cmax
 
-        return neighborhood_matrix  # 返回邻域矩阵
+                    # 使用启发式算法（可能来自LLM）获取扰动后的处理时间矩阵和待扰动作业
+                    tasks_perturb, jobs = heuristic.get_matrix_and_jobs(pi, tasks.copy(), machines_val, n)
 
-    # 评估启发式算法在多个TSP实例上的性能，返回平均差距（与最优解的偏差百分比）
-    def evaluateGLS(self,heuristic):
+                    # 检查待扰动作业列表的有效性，若不符合要求则返回大值
+                    if ( len(jobs) <= 1):
+                        print("jobs is not a list of size larger than 1")          
+                        return 1E10   
+                    # 如果作业数量超过5，取前5个
+                    if  ( len(jobs) > 5):
+                        jobs = jobs[:5]
 
-        gaps = np.zeros(self.n_inst_eva)  # 初始化存储每个实例差距的数组
+                    # 计算扰动后的处理时间矩阵对应的最大完工时间
+                    cmax = makespan(pi, tasks_perturb, machines_val)
 
-        # 遍历每个评估实例，计算差距
-        for i in range(self.n_inst_eva):
-            # 求解第i个实例，得到差距
-            gap = solve_instance(i,self.opt_costs[i],  
-                                 self.instances[i], 
-                                 self.coords[i],
-                                 self.time_limit,
-                                 self.ite_max,
-                                 self.perturbation_moves,
-                                 heuristic)
-            gaps[i] = gap  # 存储当前实例的差距
+                    # 对指定作业进行带扰动的局部搜索
+                    pi = local_search_perturb(pi, cmax,tasks_perturb,machines_val,jobs)
 
-        return np.mean(gaps)  # 返回平均差距
+                    # 迭代次数加1
+                    n_itr +=1
+                    # 每50次迭代，将当前序列重置为最优序列
+                    if n_itr % 50 == 0:
+                        pi = pi_best
+                        cmax = cmax_best
 
+            # 捕获异常，将最优值设为大值
+            except Exception as e:
+                cmax_best = 1E10
+        
+            # 存储当前实例的最优最大完工时间
+            cmax_best_list[n_inst] = cmax_best
+            n_inst += 1
+            # 达到测试实例数量则停止
+            if n_inst == self.n_inst_eva:
+                break
+        
+        # 返回所有实例的平均最优最大完工时间
+        return np.average(cmax_best_list)
 
-    # 注释掉的另一种evaluateGLS实现，使用并行计算处理64个实例
-    # def evaluateGLS(self,heuristic):
-    #
-    #     nins = 64    
-    #     gaps = np.zeros(nins)
-    #
-    #     print("Start evaluation ...")   
-    #
-    #     inputs = [(x,self.opt_costs[x],  self.instances[x], self.coords[x],self.time_limit,self.ite_max,self.perturbation_moves) for x in range(nins)]
-    #     #gaps = Parallel(n_jobs=nins)(delayed(solve_instance)(*input) for input in inputs)
-    #     try:
-    #             gaps = Parallel(n_jobs= 4, timeout = self.time_limit*1.1)(delayed(solve_instance)(*input) for input in inputs)
-    #     except:
-    #             print("### timeout or other error, return a large fitness value ###")
-    #             return 1E10
-    #     return np.mean(gaps)
+    ###################################################################### NEH算法 ############################################
+    # 计算每个作业的总处理时间并按降序排序，返回排序后的作业索引
+    def sum_and_order(self,tasks_val, machines_val, tasks):
+        tab = []
+        tab1 = []
+        # 初始化存储总处理时间的列表
+        for i in range(0, tasks_val):
+            tab.append(0)
+            tab1.append(0)
+        # 计算每个作业的总处理时间
+        for j in range(0, tasks_val):
+            for k in range(0, machines_val):
+                tab[j] += tasks[j][k]
+        tmp_tab = tab.copy()
+        place = 0
+        iter = 0
+        # 按总处理时间降序排序作业
+        while(iter != tasks_val):
+            max_time = 1
+            for i in range(0, tasks_val):
+                if(max_time < tab[i]):
+                    max_time = tab[i]
+                    place = i
+            tab[place] = 1
+            tab1[iter] = place
+            iter = iter + 1
+        return tab1
 
+    # 在序列的指定位置插入值，返回新序列
+    def insertNEH(self,sequence, position, value):
+        new_seq = sequence[:]
+        new_seq.insert(position, value)
+        return new_seq
 
-    # 注释掉的evaluate方法，可能是早期版本，不接收代码字符串参数
-    # def evaluate(self):
-    #     try:        
-    #         fitness = self.evaluateGLS()
-    #         return fitness
-    #     except Exception as e:
-    #         print("Error:", str(e))  # Print the error message
-    #         return None
+    # NEH算法：生成初始调度序列并计算其最大完工时间
+    def neh(self,tasks, machines_val, tasks_val):
+        # 按总处理时间降序获取作业顺序
+        order = self.sum_and_order(tasks_val, machines_val, tasks)
+        current_seq = [order[0]]
+        # 依次将每个作业插入到当前序列的最优位置
+        for i in range(1, tasks_val):
+            min_cmax = float("inf")
+            for j in range(0, i + 1):
+                tmp = self.insertNEH(current_seq, j, order[i])
+                cmax_tmp = makespan(tmp, tasks, machines_val)
+                # 记录最优插入位置
+                if min_cmax > cmax_tmp:
+                    best_seq = tmp
+                    min_cmax = cmax_tmp
+            current_seq = best_seq
+        # 返回最优序列和对应的最大完工时间
+        return current_seq, makespan(current_seq, tasks, machines_val)
 
-    # 评估给定的代码字符串（启发式算法代码）的性能，返回适应度（平均差距）
+    # 读取训练数据集中的实例，返回作业数、机器数和处理时间矩阵的列表
+    def read_instances(self):
+        tasks_val_list = [] 
+        machines_val_list = [] 
+        tasks_list = []
+
+        # 读取1到64号实例文件
+        for i in range(1,65):
+            filename = "./TrainingData/"+ str(i) + ".txt"
+            file = open(filename, "r")
+
+            # 读取第一行的作业数和机器数
+            tasks_val, machines_val = file.readline().split()
+            tasks_val = int(tasks_val)
+            machines_val = int(machines_val)
+
+            # 初始化处理时间矩阵并读取数据
+            tasks = np.zeros((tasks_val,machines_val))
+            for i in range(tasks_val):
+                tmp = file.readline().split()
+                for j in range(machines_val):
+                    tasks[i][j] = int(float(tmp[j*2+1]))  # 取每个操作的处理时间（假设格式为机器索引和时间交替）
+
+            # 将实例数据添加到列表
+            tasks_val_list.append(tasks_val)
+            machines_val_list.append(machines_val)
+            tasks_list.append(tasks)
+
+            file.close()
+
+        return tasks_val_list, machines_val_list, tasks_list
+
+    # 评估函数：执行传入的代码字符串作为启发式算法，并返回平均最优最大完工时间
     def evaluate(self, code_string):
         try:
             # 抑制警告
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
 
-                # 创建一个新的模块对象，用于执行代码字符串
+                # 创建一个新的模块对象
                 heuristic_module = types.ModuleType("heuristic_module")
                 
                 # 在新模块的命名空间中执行代码字符串
                 exec(code_string, heuristic_module.__dict__)
 
-                # 将新模块添加到sys.modules中，使其可以被导入
+                # 将模块添加到sys.modules中以便导入
                 sys.modules[heuristic_module.__name__] = heuristic_module
 
-                # 打印代码字符串（调试用，当前注释掉）
-                #print(code_string)
-                # 评估该启发式模块的性能，得到适应度
-                fitness = self.evaluateGLS(heuristic_module)
+                # 使用该启发式算法执行广义局部搜索并获取适应度（平均最大完工时间）
+                fitness = self.gls(heuristic_module)
 
-                return fitness  # 返回适应度
+                return fitness
             
+        # 捕获异常，返回None
         except Exception as e:
-            # 打印错误信息（当前注释掉）
-            #print("Error:", str(e))
-            return None  # 发生错误时返回None
+            return None
